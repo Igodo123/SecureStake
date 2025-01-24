@@ -4,6 +4,7 @@
 (define-constant ERR-INSUFFICIENT-BALANCE (err u103))
 (define-constant ERR-LIQUIDATION-NOT-ALLOWED (err u104))
 (define-constant ERR-TRANSFER-FAILED (err u105))
+(define-constant ERR-INVALID-LOAN-ID (err u106))
 
 (define-map loans 
   {user: principal, loan-id: uint}
@@ -15,10 +16,7 @@
   }
 )
 
-(define-map user-loans 
-  principal 
-  (list 10 uint)
-)
+(define-map user-loans principal (list 10 uint))
 
 (define-data-var loan-counter uint u0)
 (define-data-var min-collateral-ratio uint u150)
@@ -65,6 +63,14 @@
     (interest-rate (get interest-rate loan))
   )
     (+ principal (/ (* principal interest-rate u10) u100))
+  )
+)
+
+(define-read-only (is-valid-loan-id (user principal) (loan-id uint))
+  (let (
+    (user-loans-list (default-to (list) (map-get? user-loans user)))
+  )
+    (is-some (index-of user-loans-list loan-id))
   )
 )
 
@@ -121,63 +127,76 @@
 (define-public (repay-loan (loan-id uint))
   (let (
     (user tx-sender)
-    (loan (unwrap! (map-get? loans {user: user, loan-id: loan-id}) 
-            (err ERR-LOAN-NOT-FOUND)))
-    (total-repayment (calculate-total-repayment 
-      {amount: (get amount loan), interest-rate: (get interest-rate loan)}))
   )
-    (begin
-      (asserts! (>= (unwrap-panic (get-balance user)) 
-                  total-repayment) 
-        (err ERR-INSUFFICIENT-BALANCE))
-      
-      (unwrap! (burn-tokens total-repayment user)
-        (err ERR-TRANSFER-FAILED)
+    (asserts! (is-valid-loan-id user loan-id)
+      (err ERR-INVALID-LOAN-ID))
+    
+    (let (
+      (loan (unwrap! (map-get? loans {user: user, loan-id: loan-id}) 
+              (err ERR-LOAN-NOT-FOUND)))
+      (total-repayment (calculate-total-repayment 
+        {amount: (get amount loan), interest-rate: (get interest-rate loan)}))
+    )
+      (begin
+        (asserts! (>= (unwrap-panic (get-balance user)) 
+                    total-repayment) 
+          (err ERR-INSUFFICIENT-BALANCE))
+        
+        (unwrap! (burn-tokens total-repayment user)
+          (err ERR-TRANSFER-FAILED)
+        )
+        
+        (unwrap! (as-contract 
+          (transfer-collateral 
+            (get collateral loan) 
+            tx-sender 
+            user))
+          (err ERR-TRANSFER-FAILED)
+        )
+        
+        (map-set loans 
+          {user: user, loan-id: loan-id}
+          (merge loan {is-active: false})
+        )
+        
+        (ok true)
       )
-      
-      (unwrap! (as-contract 
-        (transfer-collateral 
-          (get collateral loan) 
-          tx-sender 
-          user))
-        (err ERR-TRANSFER-FAILED)
-      )
-      
-      (map-set loans 
-        {user: user, loan-id: loan-id}
-        (merge loan {is-active: false})
-      )
-      
-      (ok true)
     )
   )
 )
 
 (define-public (liquidate (user principal) (loan-id uint))
   (let (
-    (loan (unwrap! (map-get? loans {user: user, loan-id: loan-id}) 
-            (err ERR-LOAN-NOT-FOUND)))
-    (current-collateral-ratio (calculate-current-collateral-ratio 
-      {amount: (get amount loan), collateral: (get collateral loan)}))
+    (sender tx-sender)
   )
-    (begin
-      (asserts! (<= current-collateral-ratio (var-get liquidation-threshold))
-        (err ERR-LIQUIDATION-NOT-ALLOWED))
-      
-      (unwrap! (as-contract 
-        (transfer-collateral 
-          (/ (get collateral loan) u2)
-          tx-sender 
-          (var-get liquidator)))
-        (err ERR-TRANSFER-FAILED)
+    (asserts! (is-valid-loan-id user loan-id)
+      (err ERR-INVALID-LOAN-ID))
+    
+    (let (
+      (loan (unwrap! (map-get? loans {user: user, loan-id: loan-id}) 
+              (err ERR-LOAN-NOT-FOUND)))
+      (current-collateral-ratio (calculate-current-collateral-ratio 
+        {amount: (get amount loan), collateral: (get collateral loan)}))
+    )
+      (begin
+        (asserts! (<= current-collateral-ratio (var-get liquidation-threshold))
+          (err ERR-LIQUIDATION-NOT-ALLOWED))
+        
+        (unwrap! (as-contract 
+          (transfer-collateral 
+            (/ (get collateral loan) u2)
+            tx-sender 
+            (var-get liquidator)))
+          (err ERR-TRANSFER-FAILED)
+        )
+        
+        (map-set loans 
+          {user: user, loan-id: loan-id}
+          (merge loan {is-active: false})
+        )
+        
+        (ok true)
       )
-      
-      (map-set loans 
-        {user: user, loan-id: loan-id}
-        (merge loan {is-active: false})
-      )
-      
-      (ok true)
     )
   )
 )
